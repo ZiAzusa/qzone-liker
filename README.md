@@ -10,3 +10,6 @@ python3 qzone_liker.py
 
 ## Principle
 使用Playwright无头Chrome结合JS模拟点击。
+
+## License
+MIT License
