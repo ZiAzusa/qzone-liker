@@ -1,5 +1,5 @@
-Pillow==11.3.0
-playwright==1.48.0
-PyYAML==6.0.2
-pyzbar==0.1.9
-qrcode==7.4.2
+Pillow>=11.3.0
+playwright>=1.48.0
+PyYAML>=6.0.2
+pyzbar>=0.1.9
+qrcode>=7.4.2
