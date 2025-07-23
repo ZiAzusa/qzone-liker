@@ -20,6 +20,10 @@ QID: 10086
 BLACKLIST: [10000, 10010]
 # 刷新间隔（单位：秒）
 REFRESH_INTERVAL: 60
+# 网络操作重试次数
+RETRY_TIMES: 3
+# 网络操作超时时间（单位：秒）
+TIMEOUT: 30
 # 日志等级
 LEVEL: INFO
 """
@@ -33,25 +37,17 @@ logger = logging.getLogger(__name__)
 
 if not os.path.exists(CONFIG_PATH):
     logger.error("配置文件不存在！")
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        f.write(DEFAULT_CONFIG)
+    with open(CONFIG_PATH, 'w', encoding='utf-8') as f: f.write(DEFAULT_CONFIG)
     logger.info(f"已生成示例配置文件: {CONFIG_PATH}，请修改后重新运行")
     exit()
 
-with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-    config = yaml.safe_load(f)
-QID = config['QID']
-BLACKLIST = config['BLACKLIST']
-REFRESH_INTERVAL = config['REFRESH_INTERVAL']
-LEVEL = getattr(logging, config['LEVEL'].upper(), None)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
-logger.info(f"配置已加载: {config}")
+with open(CONFIG_PATH, 'r', encoding='utf-8') as f: config = yaml.safe_load(f)
+QID = config.get('QID', None) or logger.error("配置文件中缺少必须的QQ号！") or exit()
+BLACKLIST = config.get('BLACKLIST', [])
+REFRESH_INTERVAL = config.get('REFRESH_INTERVAL', 60)
+RETRY_TIMES = config.get('RETRY_TIMES', 3)
+TIMEOUT = config.get('TIMEOUT', 30)
+LEVEL = getattr(logging, config.get('LEVEL', 'INFO').upper(), logging.INFO)
 
 TARGET_URL = f"https://user.qzone.qq.com/{QID}/infocenter"
 LIKER = """\
@@ -62,21 +58,20 @@ LIKER = """\
   const selector = "a.item.qz_like_btn_v3:not(.item-on) > i";
   let emptyCount = 0;
   let likedCount = 0;
-  while (true) {
+  while (emptyCount <= 3) {
     const buttons = Array.from(document.querySelectorAll(selector));
-    if (buttons.length === 0) {
-      emptyCount++;
-    } else {
+    const fb = buttons.filter(btn => {
+      const userid = parseInt(btn.parentElement?.parentElement?.parentElement?.parentElement?.previousElementSibling?.previousElementSibling.querySelector(".f-nick > a").href.split('/').pop(), 10);
+      return !blacklist.includes(userid); 
+    });
+    if (fb.length === 0) { emptyCount++; } else {
       emptyCount = 0;
-      for (const btn of buttons) {
-        const userid = parseInt(btn.parentElement?.parentElement?.parentElement?.parentElement?.previousElementSibling?.previousElementSibling.querySelector(".f-nick > a").href.split('/').pop(), 10);
-        if (blacklist.includes(userid)) continue;
+      for (const btn of fb) {
         btn.click();
         likedCount++;
         await new Promise(r => setTimeout(r, 500));
       }
     }
-    if (emptyCount >= 3) break;
     window.scrollBy({ top: 1000, behavior: 'smooth' });
     await new Promise(r => setTimeout(r, 1500));
   }
@@ -84,25 +79,39 @@ LIKER = """\
 })();
 """ % str(BLACKLIST)
 
-stop_flag = False
+logger.setLevel(LEVEL)
+logger.info(f"配置已加载: {config}")
 
-def signal_handler(signum, frame):
-    global stop_flag
-    logger.warning(f"检测到 Ctrl+C，准备退出...")
-    stop_flag = True
-    exit()
+def with_retry():
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            for attempt in range(RETRY_TIMES):
+                try:
+                    return await func(*args, wait_until="networkidle", timeout=TIMEOUT*1000, **kwargs)
+                except Exception as e:
+                    if attempt < RETRY_TIMES - 1:
+                        wait_time = min(attempt + 2, 10)
+                        logger.warning(f"操作失败：{str(e)}，{wait_time}秒后进行第{attempt + 2}次重试...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"操作失败：{str(e)}，已重试{RETRY_TIMES}次，放弃重试")
+
+        return wrapper
+    return decorator
+
+def signal_handler(*args): exit(logger.warning(f"检测到 Ctrl+C，准备退出..."))
+
+async def close(browser): exit(await browser.close())
 
 async def load_qr(path):
-    image = Image.open(path)
-    result = decode(image)
-    if not result:
-        logger.error("二维码解析失败")
-        exit()
-    data = result[0].data.decode('utf-8')
+    res = decode(Image.open(path))
+    if not res: return 0
+    data = res[0].data.decode('utf-8')
     qr = qrcode.QRCode(border=1)
     qr.add_data(data)
     qr.make(fit=True)
     qr.print_ascii(invert=True)
+    return 1
 
 async def launch_browser(playwright, session=None, handle_response=None):
     browser = await playwright.chromium.launch(
@@ -118,46 +127,42 @@ async def launch_browser(playwright, session=None, handle_response=None):
             "--use-gl=desktop",
         ]
     )
-    context = await browser.new_context(storage_state=session)
+    context = await browser.new_context(storage_state=session, permissions=[])
     page = await context.new_page()
-    if handle_response:
-        page.on("response", handle_response)
-    await page.goto(TARGET_URL)
+    if handle_response: page.on("response", handle_response)
+    await (with_retry()(page.goto))(TARGET_URL)
     return browser, context, page
 
 async def login():
     async with async_playwright() as p:
         logger.info("加载登录二维码...")
-        if os.path.exists(QRCODE_PATH):
-            os.remove(QRCODE_PATH)
-
+        if os.path.exists(QRCODE_PATH): os.remove(QRCODE_PATH)
         async def handle_response(response):
             url = response.url.lower()
             if "https://xui.ptlogin2.qq.com/ssl/ptqrshow" in url:
                 data = await response.body()
-                with open(QRCODE_PATH, "wb") as f:
-                    f.write(data)
+                with open(QRCODE_PATH, "wb") as f: f.write(data)
 
         browser, context, page = await launch_browser(p, handle_response=handle_response)
-        await asyncio.sleep(5)
-        if not os.path.exists(QRCODE_PATH):
-            logger.error("未能获取二维码，请检查网络连接或页面加载情况")
-            await browser.close()
-            exit()
-        await load_qr(QRCODE_PATH)
+        await asyncio.sleep(3)
+        os.path.exists(QRCODE_PATH) or logger.error("未能获取二维码，请检查网络连接或页面加载情况") or await close(browser)
+        await load_qr(QRCODE_PATH) or logger.error("二维码解析失败") or await close(browser)
         logger.info("请扫码登录...")
-        await page.wait_for_url(re.compile(r".*/infocenter([?#].*)?$"), timeout=0)
-        logger.info("登录成功，保存状态")
-        await context.storage_state(path=SESSION_PATH)
+        try:
+            await asyncio.wait_for(page.wait_for_url(re.compile(r".*/infocenter([?#].*)?$")), timeout=120)
+            logger.info("登录成功，保存状态")
+            await context.storage_state(path=SESSION_PATH)
+        except asyncio.TimeoutError:
+            logger.error("登录超时，请重新运行程序") or await close(browser)
+
         await context.close()
         await browser.close()
 
 async def main():
-    global stop_flag
     async with async_playwright() as p:
         session = SESSION_PATH if os.path.exists(SESSION_PATH) else None
-        browser, context, page = await launch_browser(p, session)
         logger.info("加载已有登录状态..." if session else "无登录状态，需登录")
+        browser, context, page = await launch_browser(p, session)
         if not re.match(r".*/infocenter([?#].*)?$", page.url):
             logger.warning("检测到未登录，准备使用二维码登录...")
             await browser.close()
@@ -167,32 +172,23 @@ async def main():
         browser_disconnected = asyncio.Event()
         browser.on("disconnected", lambda: browser_disconnected.set())
         logger.info("开始循环刷新并点赞...（按 Ctrl+C 退出）")
-
-        try:
-            while not stop_flag:
-                if browser_disconnected.is_set():
-                    logger.warning("浏览器被关闭，退出程序...")
-                    exit()
-                    break
-
-                await page.reload()
+        while True:
+            not browser_disconnected.is_set() or logger.warning("浏览器被关闭，退出程序...") or await close(browser)
+            try:
+                await (with_retry()(page.reload))()
                 logger.info("页面已刷新，保存登录状态")
                 await page.evaluate("window.scrollTo(0, 0);")
                 await context.storage_state(path=SESSION_PATH)
-                if not re.match(r".*/infocenter([?#].*)?$", page.url):
-                    logger.critical("检测到页面跳转，可能已退出登录，程序退出")
-                    break
+                re.match(r".*/infocenter([?#].*)?$", page.url) or logger.critical("检测到页面跳转，可能已退出登录，程序退出") or await close(browser)
+            except Exception as e:
+                logger.error(f"页面刷新失败：{str(e)}")
+                continue
 
-                logger.info("执行点赞操作...")
-                await asyncio.sleep(5)
-                liked_count = await page.evaluate(LIKER)
-                logger.info(f"本轮点赞数量：{liked_count}")
-                await asyncio.sleep(REFRESH_INTERVAL)
-        except KeyboardInterrupt:
-            logger.warning("检测到 Ctrl+C，准备退出...")
-
-        await browser.close()
-        exit()
+            logger.info("执行点赞操作...")
+            await asyncio.sleep(3)
+            liked_count = await page.evaluate(LIKER)
+            logger.info(f"本轮点赞数量：{liked_count}")
+            await asyncio.sleep(REFRESH_INTERVAL)
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
