@@ -22,13 +22,16 @@ python3 qzone_liker.py
 ```
 然后根据提示修改配置文件再执行即可扫码登录。
 
-第一次登录后可以后台运行：
+也可以后台运行：
 ```shell
-nohup python3 qzone_liker.py > ./run.log 2>&1 &
+nohup python3 qzone_liker.py > /dev/null 2>&1 &
 ```
 
 ## Principle
 使用Playwright无头Chromium结合JS模拟点击。
+
+## Feature
+提供了断线重连、日志分块、邮件通知等功能。
 
 ## License
 MIT License
