@@ -189,7 +189,7 @@ async def login():
         await load_qr(QRCODE_PATH) or logger.error("二维码解析失败") or await close(browser)
         logger.info("请扫码登录...")
         try:
-            await page.wait_for_url(url=re.compile('.*/infocenter([?#].*)?$'), timeout=120000)
+            await page.wait_for_url(url=re.compile('.*/infocenter([?#].*)?$'), timeout=300000)
             logger.info("登录成功，保存状态")
             await context.storage_state(path=SESSION_PATH)
         except PlaywrightTimeoutError: logger.error("登录超时，请重新运行程序") or await close(browser)
