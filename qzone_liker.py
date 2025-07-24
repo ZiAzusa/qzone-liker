@@ -114,7 +114,8 @@ def with_retry():
         async def wrapper(*args, **kwargs):
             for attempt in range(RETRY_TIMES):
                 try:
-                    return await func(*args, wait_until="networkidle", timeout=TIMEOUT*1000, **kwargs)
+                    kwargs.update({'wait_until': 'networkidle', 'timeout': TIMEOUT*1000})
+                    return await func(*args, **kwargs)
                 except Exception as e:
                     if attempt < RETRY_TIMES - 1:
                         wait_time = min(attempt + 2, 10)
@@ -193,7 +194,6 @@ async def login():
             await context.storage_state(path=SESSION_PATH)
         except PlaywrightTimeoutError: logger.error("登录超时，请重新运行程序") or await close(browser)
 
-        await context.close()
         await browser.close()
 
 @controller()
