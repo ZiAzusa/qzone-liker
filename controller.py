@@ -45,7 +45,6 @@ class EmailController:
             message['To'] = to_addr
             message['Subject'] = Header(subject, 'utf-8')
             message.attach(MIMEText(body, 'plain', 'utf-8'))
-            
             if attach_qrcode and os.path.exists(self.qrcode_path):
                 with open(self.qrcode_path, 'rb') as f:
                     img = MIMEImage(f.read())
@@ -58,8 +57,7 @@ class EmailController:
                 await smtp.login(from_addr, password)
                 await smtp.sendmail(from_addr, [to_addr], message.as_string())
             self.logger.info(f"邮件已发送至 {to_addr}")
-        except Exception as e:
-            self.logger.error(f"发送邮件时出错: {str(e)}")
+        except Exception as e: self.logger.error(f"发送邮件时出错: {str(e)}")
 
     def controller(self):
         def decorator(func):
@@ -73,17 +71,14 @@ class EmailController:
                         max_retries == 128 or await asyncio.sleep(3)
                         max_retries -= 1
                         try:
-                            if os.path.exists(self.qrcode_path): current_mtime = os.path.getmtime(self.qrcode_path) or None
-                            else: continue
+                            current_mtime = os.path.getmtime(self.qrcode_path) if os.path.exists(self.qrcode_path) else 1
                             if last_mtime is None: last_mtime = current_mtime
                             elif current_mtime != last_mtime:
                                 self.logger.info("检测到二维码更新，发起邮件提醒")
                                 await self.send_email("QQ登录状态更新提醒", "请查看附件中的二维码进行登录（您必须使用另一台设备扫码）")
                                 break
-                        except Exception as e: 
-                            self.logger.error(f"监控登录信息时出错: {str(e)}")
-                    else:
-                        self.logger.error("登录信息监控已达到最大轮询次数，停止监控")
+                        except Exception as e: self.logger.error(f"监控登录信息时出错: {str(e)}")
+                    else: self.logger.error("登录信息监控已达到最大轮询次数，停止监控")
 
                 while True:
                     try: return await func(*args, **kwargs)
