@@ -8,6 +8,9 @@ import asyncio
 from PIL import Image
 from pyzbar.pyzbar import decode
 from playwright.async_api import async_playwright
+from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
+from logging.handlers import RotatingFileHandler
+from controller import BrowserException
 
 CONFIG_PATH = "config.yaml"
 SESSION_PATH = "session.json"
@@ -24,8 +27,21 @@ REFRESH_INTERVAL: 60
 RETRY_TIMES: 3
 # 网络操作超时时间（单位：秒）
 TIMEOUT: 30
-# 日志等级
-LEVEL: INFO
+# 日志配置
+LEVEL: INFO                 # 日志等级
+LOG_PATH: 'logs/run.log'    # 日志文件路径
+LOG_SIZE: 10                # 单个日志文件大小限制(MB)
+LOG_COUNT: 5                # 保留的日志文件数量
+
+# 是否使用SMTP服务实现断线通知
+USE_SMTP: false
+# SMTP配置（如果USE_SMTP为true，则需填写以下配置）
+SMTP:
+    SENDER: ''       # 发件人邮箱地址
+    PASSWORD: ''     # 发件人邮箱密码
+    RECEIVER: ''     # 收件人邮箱地址
+    SERVER: ''       # SMTP服务器地址
+    PORT: 587        # SMTP服务器端口
 """
 
 logging.basicConfig(
@@ -69,7 +85,7 @@ LIKER = """\
       for (const btn of fb) {
         btn.click();
         likedCount++;
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 3000));
       }
     }
     window.scrollBy({ top: 1000, behavior: 'smooth' });
@@ -80,6 +96,17 @@ LIKER = """\
 """ % str(BLACKLIST)
 
 logger.setLevel(LEVEL)
+if (log_path := config.get('LOG_PATH', None)):
+    log_dir = os.path.dirname(log_path)
+    if log_dir and not os.path.exists(log_dir): os.makedirs(log_dir)
+    log_handler = RotatingFileHandler(
+        filename=log_path,
+        maxBytes=config.get('LOG_SIZE', 10) * 1024 * 1024,
+        backupCount=config.get('LOG_COUNT', 5),
+        encoding='utf-8'
+    )
+    log_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    logger.addHandler(log_handler)
 logger.info(f"配置已加载: {config}")
 
 def with_retry():
@@ -102,6 +129,18 @@ def with_retry():
 def signal_handler(*args): exit(logger.warning(f"检测到 Ctrl+C，准备退出..."))
 
 async def close(browser): exit(await browser.close())
+
+if config.get('USE_SMTP', False):
+    from controller import EmailController
+    controller = EmailController(config).controller
+else:
+    def controller():
+        def decorator(func):
+            async def wrapper(*args, **kwargs):
+                try: return await func(*args, **kwargs)
+                except BrowserException as e: await close(e.browser)
+            return wrapper
+        return decorator
 
 async def load_qr(path):
     res = decode(Image.open(path))
@@ -149,21 +188,22 @@ async def login():
         await load_qr(QRCODE_PATH) or logger.error("二维码解析失败") or await close(browser)
         logger.info("请扫码登录...")
         try:
-            await asyncio.wait_for(page.wait_for_url(re.compile(r".*/infocenter([?#].*)?$")), timeout=120)
+            await page.wait_for_url(url=re.compile('.*/infocenter([?#].*)?$'), timeout=120000)
             logger.info("登录成功，保存状态")
             await context.storage_state(path=SESSION_PATH)
-        except asyncio.TimeoutError:
-            logger.error("登录超时，请重新运行程序") or await close(browser)
+        except PlaywrightTimeoutError: logger.error("登录超时，请重新运行程序") or await close(browser)
 
         await context.close()
         await browser.close()
 
-async def main():
+@controller()
+async def main(first_run=True):
     async with async_playwright() as p:
         session = SESSION_PATH if os.path.exists(SESSION_PATH) else None
         logger.info("加载已有登录状态..." if session else "无登录状态，需登录")
         browser, context, page = await launch_browser(p, session)
         if not re.match(r".*/infocenter([?#].*)?$", page.url):
+            if first_run: raise BrowserException(browser)
             logger.warning("检测到未登录，准备使用二维码登录...")
             await browser.close()
             await login()
@@ -179,7 +219,11 @@ async def main():
                 logger.info("页面已刷新，保存登录状态")
                 await page.evaluate("window.scrollTo(0, 0);")
                 await context.storage_state(path=SESSION_PATH)
-                re.match(r".*/infocenter([?#].*)?$", page.url) or logger.critical("检测到页面跳转，可能已退出登录，程序退出") or await close(browser)
+                if not re.match(r".*/infocenter([?#].*)?$", page.url):
+                    logger.critical("页面跳转，登录状态过期")
+                    raise BrowserException(browser)
+                
+            except BrowserException as e: raise e
             except Exception as e:
                 logger.error(f"页面刷新失败：{str(e)}")
                 continue
