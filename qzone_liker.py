@@ -15,14 +15,15 @@ from controller import BrowserException
 CONFIG_PATH = "config.yaml"
 SESSION_PATH = "session.json"
 QRCODE_PATH = "qrcode.png"
-
 DEFAULT_CONFIG = """\
-# 自己的QQ号，后续需要使用该QQ号扫码登录
+# 自己的QQ号（后续需要使用该QQ号扫码登录）
 QID: 10086
 # 黑名单QQ号列表（在这个列表内的QQ发布的说说将不会被点赞）
 BLACKLIST: [10000, 10010]
-# 刷新间隔（单位：秒）
+# 刷新获取新说说的间隔（单位：秒）
 REFRESH_INTERVAL: 60
+# 两次点赞之间间隔（单位：秒）
+LIKE_INTERVAL: 3
 # 网络操作重试次数
 RETRY_TIMES: 3
 # 网络操作超时时间（单位：秒）
@@ -33,7 +34,7 @@ LOG_PATH: 'logs/run.log'    # 日志文件路径
 LOG_SIZE: 10                # 单个日志文件大小限制(MB)
 LOG_COUNT: 5                # 保留的日志文件数量
 
-# 是否使用SMTP服务实现断线通知
+# 是否使用SMTP邮件服务实现断线通知
 USE_SMTP: false
 # SMTP配置（如果USE_SMTP为true，则需填写以下配置）
 SMTP:
@@ -43,29 +44,7 @@ SMTP:
     SERVER: ''       # SMTP服务器地址
     PORT: 587        # SMTP服务器端口
 """
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
-
-if not os.path.exists(CONFIG_PATH):
-    logger.error("配置文件不存在！")
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f: f.write(DEFAULT_CONFIG)
-    logger.info(f"已生成示例配置文件: {CONFIG_PATH}，请修改后重新运行")
-    exit()
-
-with open(CONFIG_PATH, 'r', encoding='utf-8') as f: config = yaml.safe_load(f)
-QID = config.get('QID', None) or logger.error("配置文件中缺少必须的QQ号！") or exit()
-BLACKLIST = config.get('BLACKLIST', [])
-REFRESH_INTERVAL = config.get('REFRESH_INTERVAL', 60)
-RETRY_TIMES = config.get('RETRY_TIMES', 3)
-TIMEOUT = config.get('TIMEOUT', 30)
-LEVEL = getattr(logging, config.get('LEVEL', 'INFO').upper(), logging.INFO)
-
-TARGET_URL = f"https://user.qzone.qq.com/{QID}/infocenter"
+TARGET_URL = "https://user.qzone.qq.com/%d/infocenter"
 LIKER = """\
 (async () => {
   const blacklist = %s;
@@ -85,7 +64,7 @@ LIKER = """\
       for (const btn of fb) {
         btn.click();
         likedCount++;
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, %d));
       }
     }
     window.scrollBy({ top: 1000, behavior: 'smooth' });
@@ -93,21 +72,54 @@ LIKER = """\
   }
   return likedCount;
 })();
-""" % str(BLACKLIST)
+"""
 
-logger.setLevel(LEVEL)
-if (log_path := config.get('LOG_PATH', None)):
-    log_dir = os.path.dirname(log_path)
-    if log_dir and not os.path.exists(log_dir): os.makedirs(log_dir)
-    log_handler = RotatingFileHandler(
-        filename=log_path,
-        maxBytes=config.get('LOG_SIZE', 10) * 1024 * 1024,
-        backupCount=config.get('LOG_COUNT', 5),
-        encoding='utf-8'
+def initialize(config_path):
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
-    log_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
-    logger.addHandler(log_handler)
-logger.info(f"配置已加载: {config}")
+    logger = logging.getLogger(__name__)
+    if not os.path.exists(config_path):
+        logger.error("配置文件不存在！")
+        with open(config_path, 'w', encoding='utf-8') as f: f.write(DEFAULT_CONFIG)
+        logger.info(f"已生成示例配置文件: {config_path}，请修改后重新运行")
+        exit()
+
+    with open(config_path, 'r', encoding='utf-8') as f: config = yaml.safe_load(f)
+    LEVEL = getattr(logging, config.get('LEVEL', 'INFO').upper(), logging.INFO)
+    logger.setLevel(LEVEL)
+    if log_path := config.get('LOG_PATH', None):
+        log_dir = os.path.dirname(log_path)
+        if log_dir and not os.path.exists(log_dir): os.makedirs(log_dir)
+        log_handler = RotatingFileHandler(
+            filename=log_path,
+            maxBytes=config.get('LOG_SIZE', 10) * 1024 * 1024,
+            backupCount=config.get('LOG_COUNT', 5),
+            encoding='utf-8'
+        )
+        log_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        logger.addHandler(log_handler)
+    
+    if config.get('USE_SMTP', False):
+        from controller import EmailController
+        controller = EmailController(config).controller
+    else:
+        def controller():
+            def decorator(func):
+                async def wrapper(*args, **kwargs):
+                    try:
+                        kwargs.update({'first_run': False})
+                        return await func(*args, **kwargs)
+                    except Exception as e:
+                        logger.error(f"执行函数时出错: {str(e)}")
+                        exit()
+                return wrapper
+            return decorator
+
+    logger.info(f"配置已加载: {config}")
+    return logger, config, controller
 
 def with_retry():
     def decorator(func):
@@ -121,8 +133,7 @@ def with_retry():
                         wait_time = min(attempt + 2, 10)
                         logger.warning(f"操作失败：{str(e)}，{wait_time}秒后进行第{attempt + 2}次重试...")
                         await asyncio.sleep(wait_time)
-                    else:
-                        logger.error(f"操作失败：{str(e)}，已重试{RETRY_TIMES}次，放弃重试")
+                    else: logger.error(f"操作失败：{str(e)}，已重试{RETRY_TIMES}次，放弃重试")
 
         return wrapper
     return decorator
@@ -130,18 +141,6 @@ def with_retry():
 def signal_handler(*args): exit(logger.warning(f"检测到 Ctrl+C，准备退出..."))
 
 async def close(browser): exit(await browser.close())
-
-if config.get('USE_SMTP', False):
-    from controller import EmailController
-    controller = EmailController(config).controller
-else:
-    def controller():
-        def decorator(func):
-            async def wrapper(*args, **kwargs):
-                try: return await func(*args, **kwargs)
-                except BrowserException as e: await close(e.browser)
-            return wrapper
-        return decorator
 
 async def load_qr(path):
     res = decode(Image.open(path))
@@ -196,7 +195,6 @@ async def login():
 
         await browser.close()
 
-@controller()
 async def main(first_run=True):
     async with async_playwright() as p:
         session = SESSION_PATH if os.path.exists(SESSION_PATH) else None
@@ -235,6 +233,18 @@ async def main(first_run=True):
             await asyncio.sleep(REFRESH_INTERVAL)
 
 if __name__ == "__main__":
+    logger, config, controller = initialize(CONFIG_PATH)
+
+    QID = config.get('QID', None) or logger.error("配置文件中缺少必须的QQ号！") or exit()
+    BLACKLIST = config.get('BLACKLIST', [])
+    REFRESH_INTERVAL = config.get('REFRESH_INTERVAL', 60)
+    LIKE_INTERVAL = config.get('LIKE_INTERVAL', 3)*1000
+    RETRY_TIMES = config.get('RETRY_TIMES', 3)
+    TIMEOUT = config.get('TIMEOUT', 30)
+
+    TARGET_URL = TARGET_URL % QID
+    LIKER = LIKER % (str(BLACKLIST), LIKE_INTERVAL)
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    asyncio.run(main())
+    asyncio.run((controller()(main))())
