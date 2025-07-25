@@ -4,6 +4,8 @@
 ## Released Usage
 Win端（x86）直接下载Release中的xxx-win-amd64，解压运行后根据提示修改配置文件再执行即可扫码登录。
 
+生成的yaml配置文件可使用记事本打开编辑。
+
 ## Usage
 安装需要的依赖，并初始化配置文件
 ```shell
