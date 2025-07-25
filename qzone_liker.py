@@ -1,14 +1,16 @@
 import os
 import re
+import sys
 import cv2
+import glob
 import yaml
 import signal
 import qrcode
 import logging
 import asyncio
-from playwright.async_api import async_playwright
-from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
 from logging.handlers import RotatingFileHandler
+from playwright.async_api import async_playwright, Error
+from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
 from controller import BrowserException
 
 CONFIG_PATH = "config.yaml"
@@ -84,7 +86,7 @@ def initialize(config_path):
         logger.error("配置文件不存在！")
         with open(config_path, 'w', encoding='utf-8') as f: f.write(DEFAULT_CONFIG)
         logger.info(f"已生成示例配置文件: {config_path}，请修改后重新运行")
-        exit()
+        sys.exit()
 
     with open(config_path, 'r', encoding='utf-8') as f: config = yaml.safe_load(f)
     LEVEL = getattr(logging, config.get('LEVEL', 'INFO').upper(), logging.INFO)
@@ -113,7 +115,7 @@ def initialize(config_path):
                         return await func(*args, **kwargs)
                     except Exception as e:
                         logger.error(f"执行函数时出错: {str(e)}")
-                        exit()
+                        sys.exit()
                 return wrapper
             return decorator
 
@@ -133,13 +135,12 @@ def with_retry():
                         logger.warning(f"操作失败：{str(e)}，{wait_time}秒后进行第{attempt + 2}次重试...")
                         await asyncio.sleep(wait_time)
                     else: logger.error(f"操作失败：{str(e)}，已重试{RETRY_TIMES}次，放弃重试")
-
         return wrapper
     return decorator
 
-def signal_handler(*args): exit(logger.warning(f"检测到 Ctrl+C，准备退出..."))
+def signal_handler(*args): sys.exit(logger.warning(f"检测到 Ctrl+C，准备退出...（如未退出可重试）"))
 
-async def close(browser): exit(await browser.close())
+async def close(browser): sys.exit(await browser.close())
 
 async def load_qr(path):
     img = cv2.imread(path)
@@ -153,9 +154,9 @@ async def load_qr(path):
     return 1
 
 async def launch_browser(playwright, session=None, handle_response=None):
-    browser = await playwright.chromium.launch(
-        headless=False,
-        args=[
+    params = {
+        'headless': False,
+        'args': [
             "--headless=new",
             "--no-proxy-server",
             "--disable-blink-features=AutomationControlled",
@@ -165,7 +166,13 @@ async def launch_browser(playwright, session=None, handle_response=None):
             "--enable-gpu",
             "--use-gl=desktop",
         ]
-    )
+    }
+    try: browser = await playwright.chromium.launch(**params)
+    except Error:
+        matcher = "./chrom*/chrome.exe" if sys.platform.startswith('win') else "./chrom*/chrome"
+        (chromium_path := glob.glob(matcher)) or logger.error("未找到Chromium，请检查其是否存在") or sys.exit()
+        browser = await playwright.chromium.launch(executable_path=chromium_path[0], **params)
+
     context = await browser.new_context(storage_state=session, permissions=[])
     page = await context.new_page()
     if handle_response: page.on("response", handle_response)
@@ -192,7 +199,6 @@ async def login():
             logger.info("登录成功，保存状态")
             await context.storage_state(path=SESSION_PATH)
         except PlaywrightTimeoutError: logger.error("登录超时，请重新运行程序") or await close(browser)
-
         await browser.close()
 
 async def main(first_run=True):
@@ -235,13 +241,12 @@ async def main(first_run=True):
 if __name__ == "__main__":
     logger, config, controller = initialize(CONFIG_PATH)
 
-    QID = config.get('QID', None) or logger.error("配置文件中缺少必须的QQ号！") or exit()
+    QID = config.get('QID', None) or logger.error("配置文件中缺少必须的QQ号！") or sys.exit()
     BLACKLIST = config.get('BLACKLIST', [])
     REFRESH_INTERVAL = config.get('REFRESH_INTERVAL', 60)
     LIKE_INTERVAL = config.get('LIKE_INTERVAL', 3)*1000
     RETRY_TIMES = config.get('RETRY_TIMES', 3)
     TIMEOUT = config.get('TIMEOUT', 30)
-
     TARGET_URL = TARGET_URL % QID
     LIKER = LIKER % (str(BLACKLIST), LIKE_INTERVAL)
 
