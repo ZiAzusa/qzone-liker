@@ -1,12 +1,11 @@
 import os
 import re
+import cv2
 import yaml
 import signal
 import qrcode
 import logging
 import asyncio
-from PIL import Image
-from pyzbar.pyzbar import decode
 from playwright.async_api import async_playwright
 from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
 from logging.handlers import RotatingFileHandler
@@ -104,7 +103,7 @@ def initialize(config_path):
     
     if config.get('USE_SMTP', False):
         from controller import EmailController
-        controller = EmailController(config).controller
+        controller = EmailController(logger, config).controller
     else:
         def controller():
             def decorator(func):
@@ -143,9 +142,10 @@ def signal_handler(*args): exit(logger.warning(f"检测到 Ctrl+C，准备退出
 async def close(browser): exit(await browser.close())
 
 async def load_qr(path):
-    res = decode(Image.open(path))
-    if not res: return 0
-    data = res[0].data.decode('utf-8')
+    img = cv2.imread(path)
+    detector = cv2.QRCodeDetector()
+    data, _, _ = detector.detectAndDecode(img)
+    if not data: return 0
     qr = qrcode.QRCode(border=1)
     qr.add_data(data)
     qr.make(fit=True)
