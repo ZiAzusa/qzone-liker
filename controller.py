@@ -7,6 +7,7 @@ class EmailController:
     def __init__(self, logger, config):
         modules = {
             'os': None,
+            'sys': None,
             'logging': None,
             'asyncio': None,
             'aiosmtplib': None,
@@ -47,7 +48,6 @@ class EmailController:
             message['To'] = to_addr
             message['Subject'] = Header(subject, 'utf-8')
             message.attach(MIMEText(body, 'plain', 'utf-8'))
-
             if os.path.exists(self.qrcode_path):
                 with open(self.qrcode_path, 'rb') as f:
                     img = MIMEImage(f.read())
@@ -94,7 +94,7 @@ class EmailController:
                         asyncio.create_task(watch_qrcode())
                     except Exception as e:
                         self.logger.error(f"执行函数时出错: {str(e)}")
-                        exit()
+                        sys.exit()
 
             return wrapper
         return decorator
